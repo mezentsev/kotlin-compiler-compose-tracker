@@ -8,69 +8,136 @@ import androidx.compose.runtime.cache
 import androidx.compose.runtime.snapshots.ObserverHandle
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.runtime.snapshots.StateObject
-import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.stateFieldNameMap
-import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.stateValueGetterMap
+import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.trackedStateChanges
 import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.trackedStateObjects
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class StateValue(val previousValue: Any?, val newValue: Any?)
-
-fun interface StateObjectGetter {
-    operator fun invoke(state: Any): StateObject?
+internal data class StateObjectComposition(
+    val state: StateObject,
+    val composableFunctionName: String,
+    val stateName: String,
+    val fileNameWithPackage: String,
+) {
+    override fun toString(): String = "$stateName [${fileNameWithPackage}#${composableFunctionName}]#${state.javaClass.simpleName}"
 }
 
-fun interface StateValueGetter {
-    operator fun invoke(target: StateObject): StateValue
+internal data class StateObjectChange(
+    val prevValue: Any?,
+    val newValue: Any?,
+) {
+    override fun toString(): String {
+        return buildString {
+            append("[")
+            append(
+                if (prevValue != null) {
+                    "'$prevValue' -> "
+                } else {
+                    ""
+                }
+            )
+            append("'$newValue']")
+        }
+    }
+}
+
+internal interface StateObjectChangeNotifier {
+    fun changed(composition: StateObjectComposition, change: StateObjectChange)
+
+    fun forgotten(composition: StateObjectComposition)
+
+    fun remembered(composition: StateObjectComposition, change: StateObjectChange)
+}
+
+private val TRACKER_NOTIFIER = object : StateObjectChangeNotifier {
+    override fun changed(composition: StateObjectComposition, change: StateObjectChange) {
+        Log.i("TRACKER", "[Change] $composition: $change")
+    }
+
+    override fun forgotten(composition: StateObjectComposition) {
+        Log.i("TRACKER", "[Forgotten] $composition")
+    }
+
+    override fun remembered(composition: StateObjectComposition, change: StateObjectChange) {
+        Log.i("TRACKER", "[Remembered] $composition: $change")
+    }
 }
 
 internal object StateObjectTrackManager {
     private val started = AtomicBoolean(false)
-    private var previousHandle: ObserverHandle? = null
+    private var observerHandler: ObserverHandle? = null
 
-    internal val trackedStateObjects = mutableMapOf<String, MutableSet<StateObject>>()
-
-    internal val stateFieldNameMap = mutableMapOf<StateObject, String>()
-    internal val stateValueGetterMap = mutableMapOf<StateObject, StateValueGetter>()
-    internal val stateLocationMap = mutableMapOf<StateObject, AffectedComposable>()
+    internal val trackedStateObjects = mutableMapOf<Int, StateObjectComposition>()
+    internal val trackedStateChanges = mutableMapOf<Int, StateObjectChange>()
 
     internal fun ensureStarted() {
         if (started.compareAndSet(false, true)) {
-            previousHandle = Snapshot.registerApplyObserver { stateObjects, _ ->
+            observerHandler = Snapshot.registerApplyObserver { stateObjects, _ ->
                 stateObjects.forEach loop@{ stateObject ->
                     if (stateObject !is StateObject) return@loop
 
-                    val name = stateFieldNameMap[stateObject] ?: return@loop
-                    val value = stateValueGetterMap[stateObject]?.invoke(stateObject) ?: return@loop
+                    val state = trackedStateObjects[stateObject.hashCode()] ?: return@loop
+                    val oldChange = trackedStateChanges[stateObject.hashCode()] ?: return@loop
 
-                    println(
-                        "TRACKER: $name changed from ${value.previousValue} to ${value.newValue}"
+                    val newChange = oldChange.copy(
+                        prevValue = oldChange.newValue,
+                        newValue = (stateObject as? State<*>)?.value
                     )
+
+                    trackedStateChanges[stateObject.hashCode()] = newChange
+
+                    if (newChange.prevValue == null) {
+                        TRACKER_NOTIFIER.remembered(state, newChange)
+                    } else {
+                        TRACKER_NOTIFIER.changed(state, newChange)
+                    }
                 }
             }
         }
     }
 }
 
-fun <State : Any> registerTracking(
-    state: State,
+fun <S : Any> registerTracking(
+    state: S,
     composer: Composer,
-    composableKeyName: String,
+    composableFunctionName: String,
     stateName: String,
-    stateObjectGetter: StateObjectGetter = ComposeStateObjectGetter,
-    stateValueGetter: StateValueGetter = ComposeStateObjectValueGetter,
-): State = state.also {
+    fileNameWithPackage: String,
+): S = state.also {
+    val hash = state.hashCode()
+
     val register by lazy {
         object : RememberObserver {
             override fun onRemembered() {
                 try {
-                    println("TRACKER: Load onRemembered ${state.javaClass}")
-                    val stateObject = stateObjectGetter(state) ?: return
-                    println("TRACKER: Load: ${stateObject}")
-                    trackedStateObjects.getOrPut(composableKeyName, ::mutableSetOf)
-                        .add(stateObject)
-                    stateFieldNameMap.putIfNotPresent(stateObject, stateName)
-                    stateValueGetterMap.putIfNotPresent(stateObject, stateValueGetter)
-                    ComposeStateObjectValueGetter.initialize(stateObject)
+                    val stateObject = when (state) {
+                        is StateObject -> state
+                        else -> return
+                    }
+
+                    val savedState = trackedStateObjects.getOrPut(hash) { StateObjectComposition(
+                            stateObject,
+                            composableFunctionName,
+                            stateName,
+                            fileNameWithPackage,
+                        )
+                    }
+
+                    val savedChange = trackedStateChanges.compute(hash) { k, v ->
+                        val rememberedValue = Snapshot.withoutReadObservation {
+                            (stateObject as? State<*>)?.value
+                        }
+
+                        if (v == null || v.newValue != rememberedValue) {
+                            StateObjectChange(
+                                prevValue = v?.newValue,
+                                newValue = rememberedValue
+                            )
+                        } else {
+                            v
+                        }
+                    }
+
+                    TRACKER_NOTIFIER.remembered(savedState, savedChange!!)
                 } catch (unexpectedException: Exception) {
                     Log.e(
                         "TRACKER",
@@ -81,14 +148,10 @@ fun <State : Any> registerTracking(
             }
 
             override fun onForgotten() {
-                // getOrDefault is available from API 24 (project minSdk is 21)
-                trackedStateObjects[composableKeyName].orEmpty().forEach { state ->
-                    println("TRACKER: Load onForgotten ${state.javaClass}")
-                    stateFieldNameMap.remove(state)
-                    stateValueGetterMap.remove(state)
-                    ComposeStateObjectValueGetter.clean(state)
+                trackedStateObjects[hash]?.let {
+                    TRACKER_NOTIFIER.forgotten(it)
                 }
-                trackedStateObjects.remove(composableKeyName)
+                trackedStateObjects.remove(hash)
             }
 
             override fun onAbandoned() {}
@@ -97,68 +160,8 @@ fun <State : Any> registerTracking(
 
     StateObjectTrackManager.ensureStarted()
 
-    val hash = state.hashCode() + stateName.hashCode()
-    println("TRACKER: Saved $hash ${state.javaClass}")
+    Log.d("TRACKER", "Saved hash: $hash, $stateName, composableFunctionName: $composableFunctionName, fileName: $fileNameWithPackage")
     composer.startReplaceableGroup(hash)
-    composer.cache(true) { register }
+    composer.cache(false) { register }
     composer.endReplaceableGroup()
-}
-
-object ComposeStateObjectGetter : StateObjectGetter {
-    override fun invoke(state: Any): StateObject? =
-        when (state) {
-            is StateObject -> state
-            else -> null /* error("Unsupported state type: ${state::class.java}") */
-        }
-}
-
-object ComposeStateObjectValueGetter : StateValueGetter {
-    private val STATE_NO_VALUE = object {
-        override fun toString() = "STATE_NO_VALUE"
-    }
-
-    private val stateValueMap = mutableMapOf<StateObject, StateValue>()
-
-    private fun StateObject.getCurrentValue() = Snapshot.withoutReadObservation {
-        (this as? State<*>
-            ?: throw UnsupportedOperationException("Unsupported StateObject type: ${this::class.java}")).value
-    }
-
-    internal fun initialize(key: StateObject) {
-        stateValueMap.putIfNotPresent(
-            key,
-            StateValue(previousValue = STATE_NO_VALUE, newValue = key.getCurrentValue()),
-        )
-    }
-
-    internal fun clean(key: StateObject) {
-        stateValueMap.remove(key)
-    }
-
-    internal fun clear() {
-        stateValueMap.clear()
-    }
-
-    override fun invoke(target: StateObject): StateValue =
-        StateValue(
-            previousValue = stateValueMap[target]!!.newValue,
-            newValue = target.getCurrentValue(),
-        ).also { newValue ->
-            stateValueMap[target] = newValue
-        }
-}
-
-
-data class AffectedComposable(
-    val name: String,
-    val pkg: String,
-    val filePath: String,
-    val startLine: Int,
-    val startColumn: Int,
-) {
-    public val fqName: String = pkg.takeUnless(String::isEmpty)?.plus(".").orEmpty() + name
-}
-
-internal fun <K, V> MutableMap<K, V>.putIfNotPresent(key: K, value: V) {
-    if (!containsKey(key)) put(key, value)
 }

@@ -12,11 +12,12 @@ import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
 import org.jetbrains.kotlin.config.CompilerConfiguration
 
 class TrackerComposeCompilerRegistrar : CompilerPluginRegistrar() {
+    private lateinit var messageCollector: MessageCollector
 
     override val supportsK2 = true
 
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
-        val messageCollector = configuration.get(
+        messageCollector = configuration.get(
             CLIConfigurationKeys.MESSAGE_COLLECTOR_KEY,
             MessageCollector.NONE
         )

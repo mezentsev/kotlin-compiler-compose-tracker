@@ -1,8 +1,5 @@
-@file:OptIn(UnsafeCastFunction::class)
-
 package pro.mezentsev.tracker.tracer
 
-import pro.mezentsev.tracker.TrackerComposeIrApplier.Companion.ComposableFq
 import org.jetbrains.kotlin.backend.common.IrElementTransformerVoidWithContext
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.backend.common.lower.DeclarationIrBuilder
@@ -14,9 +11,8 @@ import org.jetbrains.kotlin.ir.builders.irBlockBody
 import org.jetbrains.kotlin.ir.builders.irCall
 import org.jetbrains.kotlin.ir.builders.irGet
 import org.jetbrains.kotlin.ir.builders.irString
-import org.jetbrains.kotlin.ir.builders.irTemporary
+import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
 import org.jetbrains.kotlin.ir.declarations.IrFunction
-import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
 import org.jetbrains.kotlin.ir.declarations.IrValueParameter
 import org.jetbrains.kotlin.ir.declarations.IrVariable
 import org.jetbrains.kotlin.ir.expressions.IrBlock
@@ -25,26 +21,21 @@ import org.jetbrains.kotlin.ir.expressions.IrBody
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrConst
 import org.jetbrains.kotlin.ir.expressions.IrExpression
-import org.jetbrains.kotlin.ir.expressions.IrGetValue
 import org.jetbrains.kotlin.ir.expressions.IrWhen
+import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.transformStatement
 import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.classFqName
-import org.jetbrains.kotlin.ir.util.dump
 import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
-import org.jetbrains.kotlin.ir.util.hasAnnotation
+import org.jetbrains.kotlin.ir.util.superTypes
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
-import org.jetbrains.kotlin.utils.addToStdlib.UnsafeCastFunction
-import org.jetbrains.kotlin.utils.addToStdlib.safeAs
 
 internal class IrTrackComposableState(
     private val pluginContext: IrPluginContext,
     private val messageCollector: MessageCollector,
 ) {
-    private val setOfVariables = mutableSetOf<Int>()
-
     private val registerTrackerFunction = pluginContext.referenceFunctions(
         callableId = CallableId(
             FqName("pro.mezentsev.tracker.internal.compose"),
@@ -54,7 +45,8 @@ internal class IrTrackComposableState(
 
     fun irBuildBody(
         function: IrFunction,
-        body: IrBody
+        body: IrBody,
+        currentFileName: String?
     ): IrBody {
         val statements = (body as? IrBlockBody)?.statements ?: return body
 
@@ -62,9 +54,11 @@ internal class IrTrackComposableState(
             statements.forEach { statement ->
                 statement.accept(
                     StatementTransformer(
-                        this,
                         messageCollector,
-                        function.valueParameters
+                        this,
+                        registerTrackerFunction,
+                        function,
+                        currentFileName
                     ),
                     null
                 )
@@ -74,41 +68,37 @@ internal class IrTrackComposableState(
         }
     }
 
-    private inner class StatementTransformer(
-        private val irBlockBodyBuilder: IrBlockBodyBuilder,
+    private class StatementTransformer(
         private val messageCollector: MessageCollector,
-        private val valueParameters: List<IrValueParameter>,
+        private val irBlockBodyBuilder: IrBlockBodyBuilder,
+        private val registerTrackerFunction: IrSimpleFunctionSymbol,
+        private val function: IrFunction,
+        private val currentFileName: String?,
+        private val parentVariables: MutableList<IrVariable> = mutableListOf(),
+        private val depth: Int = 0
     ) : IrElementTransformerVoidWithContext() {
-        private var stateVariables = mutableListOf<IrVariable>()
-        private var stateExpressions = mutableListOf<IrExpression>()
+        private var currentStateVariables = mutableListOf<IrVariable>()
 
-        override fun visitFunctionNew(declaration: IrFunction): IrStatement {
+        override fun visitBlock(expression: IrBlock): IrExpression {
             messageCollector.report(
-                CompilerMessageSeverity.WARNING,
-                "TRACKER: inspect function: ${declaration.name.asString()}"
+                CompilerMessageSeverity.LOGGING,
+                "  ".repeat(depth) + "TRACKER: inspect block: ${expression.statements}"
             )
-            return super.visitFunctionNew(declaration)
-        }
-
-        override fun visitGetValue(expression: IrGetValue): IrExpression {
-            if (expression.type.isStateVariable()) {
-                messageCollector.report(
-                    CompilerMessageSeverity.WARNING,
-                    "TRACKER: found expression: ${expression.symbol.owner.name.asString()}"
-                )
-                stateExpressions.add(expression)
-            }
-            return super.visitGetValue(expression)
+            return super.visitBlock(expression)
         }
 
         override fun visitVariable(declaration: IrVariable): IrStatement {
-            // TODO remove "test"
-            if (declaration.name.asString() == "test" && declaration.type.isStateVariable()) {
+            messageCollector.report(
+                CompilerMessageSeverity.WARNING,
+                "  ".repeat(depth) + "TRACKER: found variable: ${declaration.name.asString()} is ${declaration.type.superTypes().map { it.classFqName?.asString() }}, ${declaration.symbol.owner.origin}"
+            )
+
+            if (declaration.type.isStateVariable() && declaration.symbol.owner.origin != IrDeclarationOrigin.IR_TEMPORARY_VARIABLE) {
                 messageCollector.report(
                     CompilerMessageSeverity.WARNING,
-                    "TRACKER: found variable: ${declaration.dump()} ${declaration.type.classFqName} is? ${declaration.type.isStateVariable()}"
+                    "  ".repeat(depth) + "TRACKER: add variable: ${declaration.name.asString()} is ${declaration.type.superTypes().map { it.classFqName?.asString() }}, ${declaration.symbol.owner.origin}"
                 )
-                stateVariables.add(declaration)
+                parentVariables.add(declaration)
             }
 
             return super.visitVariable(declaration)
@@ -116,84 +106,60 @@ internal class IrTrackComposableState(
 
         override fun visitWhen(expression: IrWhen): IrExpression {
             expression.branches.forEach { branch ->
-                val condition = branch.condition
                 val result = branch.result
-
-                when (condition) {
-                    is IrCall -> messageCollector.report(
-                        CompilerMessageSeverity.WARNING,
-                        "TRACKER: [when] found call: ${condition.symbol.owner.fqNameWhenAvailable?.asString()}"
-                    )
-
-                    is IrConst<*> -> messageCollector.report(
-                        CompilerMessageSeverity.WARNING,
-                        "TRACKER: [when] found const: ${condition.value}"
-                    )
-                }
 
                 when (result) {
                     is IrCall -> messageCollector.report(
                         CompilerMessageSeverity.WARNING,
-                        "TRACKER: [result] found call: ${result.symbol.owner.fqNameWhenAvailable?.asString()}"
+                        "  ".repeat(depth) + "TRACKER: [result] found call: ${result.symbol.owner.fqNameWhenAvailable?.asString()}"
                     )
 
                     is IrConst<*> -> messageCollector.report(
                         CompilerMessageSeverity.WARNING,
-                        "TRACKER: [result] found const: ${result.value}"
+                        "  ".repeat(depth) + "TRACKER: [result] found const: ${result.value}"
                     )
 
                     is IrBlock -> {
                         messageCollector.report(
                             CompilerMessageSeverity.WARNING,
-                            "TRACKER: [result] found block: ${result.statements}"
+                            "  ".repeat(depth) + "TRACKER: [result] found block: ${result.statements}"
                         )
 
                         val newStatements = mutableListOf<IrStatement>()
+
                         result.statements.forEach { statement ->
                             statement.transformStatement(
                                 StatementTransformer(
-                                    irBlockBodyBuilder,
                                     messageCollector,
-                                    valueParameters
+                                    irBlockBodyBuilder,
+                                    registerTrackerFunction,
+                                    function,
+                                    currentFileName,
+                                    currentStateVariables,
+                                    depth + 1
                                 )
-                            )
-
-                            messageCollector.report(
-                                CompilerMessageSeverity.WARNING,
-                                "TRACKER: [statement] transformed ${statement}"
                             )
 
                             newStatements.add(statement)
                         }
 
-                        stateVariables.firstOrNull()?.let {
-                            if (it.hashCode() in setOfVariables) {
-                                messageCollector.report(
-                                    CompilerMessageSeverity.WARNING,
-                                    "TRACKER: [variable] already added: ${it.name.asString()}"
-                                )
-                                return@let
-                            }
+                        messageCollector.report(
+                            CompilerMessageSeverity.WARNING,
+                            "  ".repeat(depth) + "TRACKER: [variable] list to add: $currentStateVariables"
+                        )
 
-                            messageCollector.report(
-                                CompilerMessageSeverity.WARNING,
-                                "TRACKER: [variable] add new statement: ${it.name.asString()}"
-                            )
-
+                        currentStateVariables.forEach {
                             irBlockBodyBuilder.irTrack(it)?.let { call ->
-                                // TODO: can't provide statement for $test variables
-                                newStatements.add(call)
-
                                 messageCollector.report(
                                     CompilerMessageSeverity.WARNING,
-                                    "TRACKER: [dump]\n ${call.dump()}"
+                                    "  ".repeat(depth) + "TRACKER: [variable] add new statement: ${it.type}"
                                 )
-                                setOfVariables.add(it.hashCode())
+
+                                newStatements.add(call)
                             }
                         }
 
-                        stateExpressions.clear()
-                        stateVariables.clear()
+                        currentStateVariables.clear()
 
                         result.statements.clear()
                         result.statements.addAll(newStatements)
@@ -205,40 +171,33 @@ internal class IrTrackComposableState(
         }
 
         private fun IrType.isStateVariable(): Boolean {
-            // Check if the type matches MutableState or similar pattern
-            val fqName = classFqName?.asString() ?: return false
-
-            return fqName.startsWith("androidx.compose.runtime.") &&
-                (fqName.contains("MutableState") ||
-                    fqName.contains("MutableIntState") ||
-                    fqName.contains("MutableFloatState") ||
-                    fqName.contains("MutableLongState") ||
-                    fqName.contains("MutableDoubleState") ||
-                    fqName.contains("MutableBooleanState"))
+            return superTypes().any { it.classFqName?.asString()?.contains("State") == true }
         }
 
         private fun IrBlockBodyBuilder.irTrack(
             stateVariable: IrVariable
         ): IrExpression? {
-            val composer = valueParameters.firstOrNull { it.name.asString() == "\$composer" }
+
+            val composer = function.valueParameters.firstOrNull { it.name.asString() == "\$composer" }
                 ?: run {
                     messageCollector.report(
                         CompilerMessageSeverity.WARNING,
-                        "Not found composer in variables: ${valueParameters.map { it.name.asString() }}"
+                        "Not found composer in variables: ${function.valueParameters.map { it.name.asString() }}"
                     )
                     return null
                 }
 
             messageCollector.report(
                 CompilerMessageSeverity.WARNING,
-                "Registered tracker"
+                "Registered tracker for ${stateVariable.name.asString()}"
             )
 
             return irCall(registerTrackerFunction).also { call ->
                 call.putValueArgument(0, irGet(stateVariable))
                 call.putValueArgument(1, irGet(composer))
-                call.putValueArgument(2, irString("test-1"))
-                call.putValueArgument(3, irString("test-2"))
+                call.putValueArgument(2, irString(function.name.asString()))
+                call.putValueArgument(3, irString(stateVariable.name.asString()))
+                call.putValueArgument(4, irString(currentFileName.orEmpty()))
             }
         }
     }

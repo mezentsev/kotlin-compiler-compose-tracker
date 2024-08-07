@@ -10,6 +10,7 @@ import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.runtime.snapshots.StateObject
 import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.trackedStateChanges
 import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.trackedStateObjects
+import timber.log.Timber
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal data class StateObjectComposition(
@@ -50,15 +51,15 @@ internal interface StateObjectChangeNotifier {
 
 private val TRACKER_NOTIFIER = object : StateObjectChangeNotifier {
     override fun changed(composition: StateObjectComposition, change: StateObjectChange) {
-        Log.i("TRACKER", "[Change] $composition: $change")
+        Timber.tag("TRACKER").i( "[Change] $composition: $change")
     }
 
     override fun forgotten(composition: StateObjectComposition) {
-        Log.i("TRACKER", "[Forgotten] $composition")
+        Timber.tag("TRACKER").i( "[Forgotten] $composition")
     }
 
     override fun remembered(composition: StateObjectComposition, change: StateObjectChange) {
-        Log.i("TRACKER", "[Remembered] $composition: $change")
+        Timber.tag("TRACKER").i("[Remembered] $composition: $change")
     }
 }
 
@@ -111,6 +112,19 @@ fun <S : Any> registerTracking(
                 try {
                     val stateObject = when (state) {
                         is StateObject -> state
+                      //  is Animatable<*, *> -> {
+            //                val internalStateField = state::class.java.declaredFields.firstOrNull { field ->
+            //                    field.type == AnimationState::class.java
+            //                }?.apply {
+            //                    isAccessible = true
+            //                }
+            //                val animationState = internalStateField?.get(state) as? AnimationState<*, *>
+            //                animationState?.let { animationState::value.obtainStateObjectOrNull() }
+            //            }
+            //            is AnimationState<*, *> -> state::value.obtainStateObjectOrNull()
+            //            is Transition<*>.TransitionAnimationState<*, *> -> state::value.obtainStateObjectOrNull()
+            //            is InfiniteTransition.TransitionAnimationState<*, *> -> state::value.obtainStateObjectOrNull()
+            //            // Throwing here is reported a bug in the Compose runtime, so we replace it with null to avoid confusing developers.
                         else -> return
                     }
 
@@ -139,10 +153,9 @@ fun <S : Any> registerTracking(
 
                     TRACKER_NOTIFIER.remembered(savedState, savedChange!!)
                 } catch (unexpectedException: Exception) {
-                    Log.e(
-                        "TRACKER",
-                        "State value tracking registration failed",
+                    Timber.tag("TRACKER").e(
                         unexpectedException,
+                        "State value tracking registration failed",
                     )
                 }
             }
@@ -160,7 +173,7 @@ fun <S : Any> registerTracking(
 
     StateObjectTrackManager.ensureStarted()
 
-    Log.d("TRACKER", "Saved hash: $hash, $stateName, composableFunctionName: $composableFunctionName, fileName: $fileNameWithPackage")
+    Timber.tag("TRACKER").d("Saved hash: $hash, $stateName, composableFunctionName: $composableFunctionName, fileName: $fileNameWithPackage")
     composer.startReplaceableGroup(hash)
     composer.cache(false) { register }
     composer.endReplaceableGroup()

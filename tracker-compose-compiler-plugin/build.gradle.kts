@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.0.0"
+    kotlin("jvm") version "2.0.10"
 }
 
 group = "pro.mezentsev.tracker"
@@ -11,6 +11,5 @@ dependencies {
     testImplementation(kotlin("test-junit"))
     testImplementation(libs.kotlin.compiler.embeddable)
     testImplementation(libs.kotlin.compiler.testing)
-    testImplementation(libs.compose.runtime)
     testImplementation(libs.compose.runtime)
 }

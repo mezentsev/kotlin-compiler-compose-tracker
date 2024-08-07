@@ -15,7 +15,7 @@ junit = "4.13.2"
 
 kotlinSerialization = "1.6.3"
 kotlinCoroutines = "1.8.1"
-kotlin = "2.0.0"
+kotlin = "2.0.10"
 
 timber = "5.0.1"
 

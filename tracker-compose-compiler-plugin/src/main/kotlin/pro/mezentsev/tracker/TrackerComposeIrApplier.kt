@@ -1,8 +1,9 @@
 package pro.mezentsev.tracker
 
-import pro.mezentsev.tracker.tracer.IrTrackComposableState
+import pro.mezentsev.tracker.compose.IrTrackComposableState
 import org.jetbrains.kotlin.backend.common.IrElementTransformerVoidWithContext
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.ir.IrStatement
 import org.jetbrains.kotlin.ir.declarations.IrFile
@@ -17,8 +18,30 @@ internal class TrackerComposeIrApplier(
 ) : IrElementTransformerVoidWithContext() {
     private var isComposable = false
     private var currentFileNameWithPackage: String? = null
+    private val logger = object : Logger {
+        override fun d(msg: String, depth: Int) {
+            messageCollector.report(
+                CompilerMessageSeverity.LOGGING,
+                " ".repeat(depth) + "Tracker: " + msg
+            )
+        }
 
-    private val irTrackComposableState = IrTrackComposableState(pluginContext, messageCollector)
+        override fun i(msg: String, depth: Int) {
+            messageCollector.report(
+                CompilerMessageSeverity.WARNING,
+                " ".repeat(depth) + "Tracker: " + msg
+            )
+        }
+
+        override fun e(msg: String, depth: Int) {
+            messageCollector.report(
+                CompilerMessageSeverity.ERROR,
+                " ".repeat(depth) + "Tracker: " + msg
+            )
+        }
+    }
+
+    private val irTrackComposableState = IrTrackComposableState(pluginContext, logger)
 
     override fun visitFileNew(declaration: IrFile): IrFile {
         currentFileNameWithPackage = declaration.nameWithPackage
@@ -44,7 +67,7 @@ internal class TrackerComposeIrApplier(
         return visitFunction
     }
 
-    internal companion object {
-        val ComposableFq = FqName("androidx.compose.runtime.Composable")
+    private companion object {
+        private val ComposableFq = FqName("androidx.compose.runtime.Composable")
     }
 }

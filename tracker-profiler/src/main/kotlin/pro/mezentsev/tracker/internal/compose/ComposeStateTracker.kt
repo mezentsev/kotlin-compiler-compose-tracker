@@ -1,6 +1,9 @@
 package pro.mezentsev.tracker.internal.compose
 
-import android.util.Log
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationState
+import androidx.compose.animation.core.InfiniteTransition
+import androidx.compose.animation.core.Transition
 import androidx.compose.runtime.Composer
 import androidx.compose.runtime.RememberObserver
 import androidx.compose.runtime.State
@@ -12,6 +15,8 @@ import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.trackedSta
 import pro.mezentsev.tracker.internal.compose.StateObjectTrackManager.trackedStateObjects
 import timber.log.Timber
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.reflect.KProperty0
+import kotlin.reflect.jvm.isAccessible
 
 internal data class StateObjectComposition(
     val state: StateObject,
@@ -74,8 +79,6 @@ internal object StateObjectTrackManager {
         if (started.compareAndSet(false, true)) {
             observerHandler = Snapshot.registerApplyObserver { stateObjects, _ ->
                 stateObjects.forEach loop@{ stateObject ->
-                    if (stateObject !is StateObject) return@loop
-
                     val state = trackedStateObjects[stateObject.hashCode()] ?: return@loop
                     val oldChange = trackedStateChanges[stateObject.hashCode()] ?: return@loop
 
@@ -104,28 +107,15 @@ fun <S : Any> registerTracking(
     stateName: String,
     fileNameWithPackage: String,
 ): S = state.also {
-    val hash = state.hashCode()
+    val hash = state.asStateObject()?.hashCode() ?: state.hashCode()
 
     val register by lazy {
         object : RememberObserver {
             override fun onRemembered() {
                 try {
-                    val stateObject = when (state) {
-                        is StateObject -> state
-                      //  is Animatable<*, *> -> {
-            //                val internalStateField = state::class.java.declaredFields.firstOrNull { field ->
-            //                    field.type == AnimationState::class.java
-            //                }?.apply {
-            //                    isAccessible = true
-            //                }
-            //                val animationState = internalStateField?.get(state) as? AnimationState<*, *>
-            //                animationState?.let { animationState::value.obtainStateObjectOrNull() }
-            //            }
-            //            is AnimationState<*, *> -> state::value.obtainStateObjectOrNull()
-            //            is Transition<*>.TransitionAnimationState<*, *> -> state::value.obtainStateObjectOrNull()
-            //            is InfiniteTransition.TransitionAnimationState<*, *> -> state::value.obtainStateObjectOrNull()
-            //            // Throwing here is reported a bug in the Compose runtime, so we replace it with null to avoid confusing developers.
-                        else -> return
+                    val stateObject = state.asStateObject() ?: run {
+                        Timber.tag("TRACKER").i("Error to remember $this")
+                        return
                     }
 
                     val savedState = trackedStateObjects.getOrPut(hash) { StateObjectComposition(
@@ -178,3 +168,27 @@ fun <S : Any> registerTracking(
     composer.cache(false) { register }
     composer.endReplaceableGroup()
 }
+
+private fun Any.asStateObject(): StateObject? {
+    return when (this) {
+        is StateObject -> this
+        is Animatable<*, *> -> {
+            val internalStateField = this::class.java.declaredFields.firstOrNull { field ->
+                field.type == AnimationState::class.java
+            }?.apply {
+                isAccessible = true
+            }
+            val animationState = internalStateField?.get(this) as? AnimationState<*, *>
+            animationState?.let { animationState::value.obtainStateObjectOrNull() }
+        }
+        is AnimationState<*, *> -> this::value.obtainStateObjectOrNull()
+        is Transition<*>.TransitionAnimationState<*, *> -> this::value.obtainStateObjectOrNull()
+        is InfiniteTransition.TransitionAnimationState<*, *> -> this::value.obtainStateObjectOrNull()
+        else -> return null
+    }
+}
+
+private fun KProperty0<*>.obtainStateObjectOrNull() = runCatching {
+    val stateValue = apply { isAccessible = true }.getDelegate()
+    stateValue as? StateObject
+}.getOrNull()

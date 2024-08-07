@@ -20,6 +20,9 @@ import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.transformStatement
 import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.classFqName
+import org.jetbrains.kotlin.ir.types.getClass
+import org.jetbrains.kotlin.ir.types.toKotlinType
+import org.jetbrains.kotlin.ir.util.dump
 import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
 import org.jetbrains.kotlin.ir.util.superTypes
 import pro.mezentsev.tracker.Logger
@@ -52,14 +55,14 @@ class ComposeStatementTransformer(
     override fun visitVariable(declaration: IrVariable): IrStatement {
         logger.d("found variable: ${declaration.name.asString()} is ${
             declaration.type.superTypes().map { it.classFqName?.asString() }
-        }, ${declaration.symbol.owner.origin}",
+        }, ${declaration.symbol.owner.origin} ${declaration.type.classFqName}",
             depth
         )
 
         if (declaration.type.isStateVariable() && declaration.symbol.owner.origin != IrDeclarationOrigin.IR_TEMPORARY_VARIABLE) {
             logger.d("add variable: ${declaration.name.asString()} is ${
                 declaration.type.superTypes().map { it.classFqName?.asString() }
-            }, ${declaration.symbol.owner.origin}",
+            }, ${declaration.symbol.owner.origin}  ${declaration.type.classFqName}",
                 depth
             )
             parentVariables.add(declaration)
@@ -130,7 +133,8 @@ class ComposeStatementTransformer(
     }
 
     private fun IrType.isStateVariable(): Boolean {
-        return superTypes().any { it.classFqName?.asString()?.contains("State") == true }
+        return superTypes().any { it.classFqName?.asString()?.contains("State") == true } ||
+                classFqName?.asString() == "androidx.compose.animation.core.Animatable"
     }
 
     private fun transformRecomposeCall(expression: IrCall): IrExpression? {

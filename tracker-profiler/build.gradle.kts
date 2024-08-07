@@ -80,6 +80,7 @@ dependencies {
     implementation(libs.timber)
 
     implementation(libs.compose.runtime)
+    implementation(libs.compose.animation)
 }
 
 composeCompiler {
